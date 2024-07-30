@@ -1,0 +1,5 @@
+# Tracking of schema changes relevant to data pipeline
+# Order is important; the last matching pattern takes the most precedence.
+#
+# Devex
+* @TransferGo/Devex
