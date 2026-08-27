@@ -6,12 +6,21 @@ add_sudo() {
   fi
 }
 
+# Function to link apt-fast to apt-get
+link_apt_fast() {
+  if ! command -v apt-fast >/dev/null; then
+    sudo ln -sf /usr/bin/apt-get /usr/bin/apt-fast
+    trap "sudo rm -f /usr/bin/apt-fast 2>/dev/null" exit
+  fi
+}
+
 # Function to setup environment for self-hosted runners.
 self_hosted_helper() {
   if ! command -v apt-fast >/dev/null; then
     sudo ln -sf /usr/bin/apt-get /usr/bin/apt-fast
     trap "sudo rm -f /usr/bin/apt-fast 2>/dev/null" exit
   fi
+  sudo mkdir -p /opt/hostedtoolcache >/dev/null 2>&1 || true
   install_packages apt-transport-https ca-certificates curl file make jq unzip autoconf automake gcc g++ gnupg
 }
 
@@ -23,6 +32,10 @@ fix_broken_packages() {
 # Function to install a package
 install_packages() {
   packages=("$@")
+  if ! [ -e /etc/dpkg/dpkg.cfg.d/force-confnew ]; then
+    echo "force-confnew" | sudo tee /etc/dpkg/dpkg.cfg.d/force-confnew >/dev/null 2>&1
+    trap "sudo rm -f /etc/dpkg/dpkg.cfg.d/force-confnew 2>/dev/null" exit
+  fi
   $apt_install "${packages[@]}" >/dev/null 2>&1 || (update_lists && fix_broken_packages && $apt_install "${packages[@]}" >/dev/null 2>&1)
 }
 
@@ -99,8 +112,8 @@ add_devtools() {
   add_log "${tick:?}" "$tool" "Added $tool $semver"
 }
 
-# Function to setup the nightly build from shivammathur/php-builder
-setup_nightly() {
+# Function to setup PHP from the shivammathur/php-builder builds.
+setup_php_builder() {
   run_script "php-builder" "${runner:?}" "$version" "${debug:?}" "${ts:?}"
 }
 
@@ -112,6 +125,51 @@ setup_old_versions() {
 # Function to setup PHP from the cached builds.
 setup_cached_versions() {
   run_script "php-ubuntu" "$version" "${debug:?}" "${ts:?}"
+}
+
+# Function to get the link path for an alternative.
+alternative_link() {
+  case "$1" in
+  php-cgi-bin) echo "/usr/lib/cgi-bin/php" ;;
+  php-fpm) echo "/usr/sbin/php-fpm" ;;
+  php-fpm.sock) echo "/run/php/php-fpm.sock" ;;
+  *) echo "/usr/bin/$1" ;;
+  esac
+}
+
+# Function to get the target path for an alternative.
+alternative_target() {
+  case "$1" in
+  php-cgi-bin) echo "/usr/lib/cgi-bin/php$version" ;;
+  php-fpm) echo "/usr/sbin/php-fpm$version" ;;
+  php-fpm.sock) echo "/run/php/php$version-fpm.sock" ;;
+  *) echo "/usr/bin/$1$version" ;;
+  esac
+}
+
+# Function to register an alternative if the versioned binary exists but is missing.
+register_alternative() {
+  local tool=$1
+  local link target priority state_file
+  target="$(alternative_target "$tool")"
+  [ -e "$target" ] || return 0
+  state_file="/var/lib/dpkg/alternatives/$tool"
+  if sudo test -r "$state_file" && sudo grep -Fxq "$target" "$state_file"; then
+    return 0
+  fi
+  link="$(alternative_link "$tool")"
+  priority="${version//./}"
+  sudo update-alternatives --install "$link" "$tool" "$target" "$priority" >/dev/null 2>&1
+}
+
+# Function to register and switch an alternative.
+set_alternative() {
+  local tool=$1
+  local target
+  target="$(alternative_target "$tool")"
+  [ -e "$target" ] || return 0
+  register_alternative "$tool" || return 1
+  sudo update-alternatives --set "$tool" "$target" >/dev/null 2>&1
 }
 
 # Function to add PECL.
@@ -130,16 +188,11 @@ switch_version() {
   tools=("$@")
   to_wait=()
   if ! (( ${#tools[@]} )); then
-    tools+=(pear pecl php phar phar.phar php-cgi php-config phpize phpdbg)
-    [ -e /usr/lib/cgi-bin/php"$version" ] && sudo update-alternatives --set php-cgi-bin /usr/lib/cgi-bin/php"$version" & to_wait+=($!)
-    [ -e /usr/sbin/php-fpm"$version" ] && sudo update-alternatives --set php-fpm /usr/sbin/php-fpm"$version" & to_wait+=($!)
-    [ -e /run/php/php"$version"-fpm.sock ] && sudo update-alternatives --set php-fpm.sock /run/php/php"$version"-fpm.sock & to_wait+=($!)
+    tools+=(php-cgi-bin php-fpm php-fpm.sock pear pecl php phar phar.phar php-cgi php-config phpize phpdbg)
   fi
   for tool in "${tools[@]}"; do
-    if [ -e "/usr/bin/$tool$version" ]; then
-      sudo update-alternatives --set "$tool" /usr/bin/"$tool$version" &
-      to_wait+=($!)
-    fi
+    set_alternative "$tool" &
+    to_wait+=($!)
   done
   wait "${to_wait[@]}"
 }
@@ -174,8 +227,8 @@ update_php() {
 # Function to install PHP.
 add_php() {
   if [ "${runner:?}" = "self-hosted" ] || [ "${use_package_cache:-true}" = "false" ]; then
-    if [[ "$version" =~ ${nightly_versions:?} ]]; then
-        setup_nightly
+    if [[ "$version" =~ ${php_builder_versions:?} || "$ts" = "zts" ]]; then
+        setup_php_builder
     else
       add_packaged_php
       switch_version >/dev/null 2>&1
@@ -234,6 +287,7 @@ setup_php() {
   step_log "Setup PHP"
   sudo mkdir -m 777 -p /var/run /run/php
   php_config="$(command -v php-config)"
+  check_pre_installed
   if [[ -z "$php_config" ]] || [ "$(php_semver | cut -c 1-3)" != "$version" ]; then
     if [ ! -e "/usr/bin/php$version" ] || [ ! -e "/usr/bin/php-config$version" ]; then
       add_php >/dev/null 2>&1
@@ -277,7 +331,7 @@ setup_php() {
 }
 
 # Variables
-version=${1:-'8.3'}
+version=${1:-'8.5'}
 ini=${2:-'production'}
 src=${0%/*}/..
 debconf_fix="DEBIAN_FRONTEND=noninteractive"
@@ -285,6 +339,7 @@ apt_install="sudo $debconf_fix apt-fast install -y --no-install-recommends"
 scripts="$src"/scripts
 
 add_sudo >/dev/null 2>&1
+link_apt_fast >/dev/null 2>&1
 
 . /etc/os-release
 # shellcheck source=.

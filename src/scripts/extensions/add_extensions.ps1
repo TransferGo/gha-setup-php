@@ -100,7 +100,7 @@ Function Add-Extension {
     $stability = 'stable',
     [Parameter(Position = 2, Mandatory = $false)]
     [ValidateNotNull()]
-    [ValidatePattern('^\d+(\.\d+){0,2}$')]
+    [ValidatePattern('^\d+(\.\d+){0,3}$')]
     [string]
     $extension_version = ''
   )
@@ -135,6 +135,10 @@ Function Add-Extension {
         if ($extension_version -ne '')
         {
           $params["Version"] = $extension_version
+        }
+        # If extension for a different version exists
+        if(Test-Path $ext_dir\php_$extension.dll) {
+          Move-Item $ext_dir\php_$extension.dll $ext_dir\php_$extension.bak.dll -Force
         }
         Install-PhpExtension @params
         Set-ExtensionPrerequisites $extension

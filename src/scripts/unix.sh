@@ -4,7 +4,8 @@ export cross="✗"
 export curl_opts=(-sL)
 export old_versions="5.[3-5]"
 export jit_versions="8.[0-9]"
-export nightly_versions="8.[3-9]"
+export php_builder_versions="8.[3-9]"
+export nightly_versions="8.[6-9]"
 export xdebug3_versions="7.[2-4]|8.[0-9]"
 export latest="releases/latest/download"
 export github="https://github.com/shivammathur"
@@ -53,8 +54,12 @@ read_env() {
   [ "${debug:-${DEBUG:-false}}" = "true" ] && debug=debug && update=true || debug=release
   [[ "${phpts:-${PHPTS:-nts}}" = "ts" || "${phpts:-${PHPTS:-nts}}" = "zts" ]] && ts=zts && update=true || ts=nts
   fail_fast="${fail_fast:-${FAIL_FAST:-false}}"
-  [[ -z "${ImageOS}" && -z "${ImageVersion}" || -n ${ACT} ]] && _runner=self-hosted || _runner=github
+  [[ ( -z "$ImageOS" && -z "$ImageVersion" ) ||
+     ( -n "$RUNNER_ENVIRONMENT" && "$RUNNER_ENVIRONMENT" = "self-hosted" ) ||
+     -n "$ACT" || -n "$CONTAINER" ]] && _runner=self-hosted || _runner=github
   runner="${runner:-${RUNNER:-$_runner}}"
+  tool_path_dir="${setup_php_tools_dir:-${SETUP_PHP_TOOLS_DIR:-/usr/local/bin}}"
+  tool_cache_path_dir="${setup_php_tool_cache_dir:-${SETUP_PHP_TOOL_CACHE_DIR:-${RUNNER_TOOL_CACHE:-/opt/hostedtoolcache}/setup-php/tools}}"  
 
   if [[ "$runner" = "github" && $_runner = "self-hosted" ]]; then
     fail_fast=true
@@ -63,13 +68,58 @@ read_env() {
 
   # Set Update to true if the ubuntu github image does not have PHP PPA.
   if [[ "$runner" = "github" && "${ImageOS}" =~ ubuntu.* ]]; then
-    check_ppa ondrej/php || update=true
+    if ! check_ppa ondrej/php; then
+      update=true
+      echo '' | sudo tee /tmp/sp_update >/dev/null 2>&1
+    elif [ -e /tmp/sp_update ]; then
+      update=true
+    fi
   fi
 
   export fail_fast
   export runner
   export update
   export ts
+  export tool_path_dir
+  export tool_cache_path_dir
+}
+
+# Function to create a lock.
+acquire_lock() {
+  lock_path="$1"
+  while true; do
+    if sudo mkdir "$lock_path" 2>/dev/null; then
+      echo $$ | sudo tee "$lock_path/pid" >/dev/null
+      return 0
+    else
+      if sudo test -f "$lock_path/pid"; then
+        lock_pid=$(sudo cat "$lock_path/pid")
+        if ! ps -p "$lock_pid" >/dev/null 2>&1; then
+          sudo rm -rf "$lock_path"
+          continue
+        fi
+      fi
+      sleep 1
+    fi
+  done
+}
+
+# Function to release the lock.
+release_lock() {
+  lock_path="$1"
+  sudo rm -rf "$lock_path"
+}
+
+# Function to get the SHA256 hash of a string.
+get_sha256() {
+  local input=$1
+  if command -v sha256sum >/dev/null; then
+    printf '%s' "$input" | sha256sum | cut -d' ' -f1
+  elif command -v shasum >/dev/null; then
+    printf '%s' "$input" | shasum -a 256 | cut -d' ' -f1
+  elif command -v openssl >/dev/null; then
+    printf '%s' "$input" | openssl dgst -sha256 | cut -d' ' -f2
+  fi
 }
 
 # Function to download a file using cURL.
@@ -84,12 +134,23 @@ get() {
   if [ "$mode" = "-s" ]; then
     sudo curl "${curl_opts[@]}" "${links[0]}"
   else
+    if [ "$runner" = "self-hosted" ]; then
+      lock_path="/tmp/sp-lck-$(get_sha256 "$file_path")"
+      acquire_lock "$lock_path"
+      if [ "$execute" = "-e" ]; then
+        until [ -z "$(fuser "$file_path" 2>/dev/null)" ]; do
+          sleep 1
+        done
+      fi
+      trap 'release_lock "$lock_path"' EXIT SIGINT SIGTERM
+    fi
     for link in "${links[@]}"; do
       status_code=$(sudo curl -w "%{http_code}" -o "$file_path" "${curl_opts[@]}" "$link")
       [ "$status_code" = "200" ] && break
     done
-    [ "$execute" = "-e" ] && sudo chmod a+x "$file_path"
+    [[ "$execute" = "-e" && -e "$file_path" ]] && sudo chmod a+x "$file_path"
     [ "$mode" = "-v" ] && echo "$status_code"
+    [ "$runner" = "self-hosted" ] && release_lock "$lock_path"
   fi
 }
 
@@ -111,14 +172,15 @@ get_shell_profile() {
 # Function to add a path to the PATH variable.
 add_path() {
   path_to_add=$1
-  [[ ":$PATH:" == *":$path_to_add:"* ]] && return
+  action=$2
+  [[ "$action" == "verify" && ":$PATH:" == *":$path_to_add:"* ]] && return
   if [[ -n "$GITHUB_PATH" ]]; then
-    echo "$path_to_add" | tee -a "$GITHUB_PATH" >/dev/null 2>&1
+    printf '%s\n%s' "$path_to_add" "$(grep -v "^${path_to_add}$" "$GITHUB_PATH" 2>/dev/null)" > "$GITHUB_PATH"
   else
     profile=$(get_shell_profile)
     ([ -e "$profile" ] && grep -q ":$path_to_add\"" "$profile" 2>/dev/null) || echo "export PATH=\"\${PATH:+\${PATH}:}\"$path_to_add" | sudo tee -a "$profile" >/dev/null 2>&1
   fi
-  export PATH="${PATH:+${PATH}:}$path_to_add"
+  [[ ":$PATH:" == *":$path_to_add:"* ]] || export PATH="${PATH:+${PATH}:}$path_to_add"
 }
 
 # Function to add environment variables using a PATH.
@@ -163,7 +225,20 @@ self_hosted_setup() {
       exit 1
     else
       self_hosted_helper >/dev/null 2>&1
-      add_env RUNNER_TOOL_CACHE /tmp
+      add_env RUNNER_TOOL_CACHE /opt/hostedtoolcache
+    fi
+  fi
+}
+
+# Function to check pre-installed PHP
+check_pre_installed() {
+  if [ "$version" = "pre" ]; then
+    if [ -n "$php_config" ]; then
+      version="$(php_semver | cut -c 1-3)"
+      update=false
+    else
+      fail_fast=true
+      add_log "$cross" "PHP" "No pre-installed PHP version found"
     fi
   fi
 }
@@ -173,7 +248,9 @@ configure_php() {
   add_php_config
   ini_config_dir="${src:?}"/configs/ini
   ini_config_files=("$ini_config_dir"/php.ini)
-  jit_config_files=("$ini_config_dir"/jit.ini)
+  arch="$(uname -m)"
+  [[ "$arch" = "arm64" || "$arch" = "aarch64" ]] && jit_ini="$ini_config_dir"/jit_aarch64.ini || jit_ini="$ini_config_dir"/jit.ini
+  jit_config_files=("$jit_ini")
   [[ "$version" =~ $xdebug3_versions ]] && ini_config_files+=("$ini_config_dir"/xdebug.ini)
   cat "${ini_config_files[@]}" | sudo tee -a "${ini_file[@]:?}" >/dev/null 2>&1
   [[ "$version" =~ $jit_versions ]] && cat "${jit_config_files[@]}" | sudo tee -a "${pecl_file:-${ini_file[@]}}" >/dev/null 2>&1

@@ -3,7 +3,7 @@ param (
   [ValidateNotNull()]
   [ValidateLength(1, [int]::MaxValue)]
   [string]
-  $version = '8.2',
+  $version = '8.4',
   [Parameter(Position = 1, Mandatory = $true)]
   [ValidateNotNull()]
   [ValidateLength(1, [int]::MaxValue)]
@@ -81,9 +81,10 @@ Function Get-PathFromRegistry {
 # Function to add a location to PATH.
 Function Add-Path {
   param(
-    [string]$PathItem
+    [string]$PathItem,
+    [switch]$Force
   )
-  if("$env:PATH;".contains("$PathItem;")) {
+  if(-not($Force) -and "$env:PATH;".contains("$PathItem;")) {
     return
   }
   if ($env:GITHUB_PATH) {
@@ -202,16 +203,20 @@ Function Install-PSPackage() {
     $cmdlet
   )
   $module_path = "$bin_dir\$psm1_path.psm1"
-  if(-not (Test-Path $module_path -PathType Leaf)) {
-    $zip_file = "$bin_dir\$package.zip"
-    Get-File -Url $url -OutFile $zip_file
-    Expand-Archive -Path $zip_file -DestinationPath $bin_dir -Force
-  }
-  Import-Module $module_path
-  if($null -eq (Get-Command $cmdlet -ErrorAction SilentlyContinue)) {
-    Install-Module -Name $package -Force
-  } else {
+  $imported = $false
+  try {
+    if(-not (Test-Path $module_path -PathType Leaf)) {
+      $zip_file = "$bin_dir\$package.zip"
+      Get-File -Url $url -OutFile $zip_file
+      Expand-Archive -Path $zip_file -DestinationPath $bin_dir -Force -ErrorAction Stop
+    }
+    Import-Module $module_path -ErrorAction Stop
+    $imported = $null -ne (Get-Command $cmdlet -ErrorAction SilentlyContinue)
+  } catch { }
+  if($imported) {
     Add-ToProfile $current_profile "$package-search" "Import-Module $module_path"
+  } else {
+    Install-Module -Name $package -Force
   }
 }
 
@@ -323,7 +328,7 @@ $php_builder = "$github/shivammathur/php-builder-windows"
 $current_profile = "$env:TEMP\setup-php.ps1"
 $ProgressPreference = 'SilentlyContinue'
 $jit_versions = '8.[0-9]'
-$nightly_versions = '8.[2-9]'
+$nightly_versions = '8.[6-9]'
 $xdebug3_versions = "7.[2-4]|8.[0-9]"
 $enable_extensions = ('openssl', 'curl', 'mbstring')
 
@@ -375,6 +380,7 @@ if(-not($env:ImageOS) -and -not($env:ImageVersion)) {
   if(-not(Test-Path -LiteralPath $current_profile)) {
     New-Item -Path $current_profile -ItemType "file" -Force >$null 2>&1
   }
+  Add-Path -PathItem $bin_dir -Force
 }
 
 $src = Join-Path -Path $PSScriptRoot -ChildPath \..
@@ -401,6 +407,15 @@ if (Test-Path -LiteralPath $php_dir -PathType Container) {
 }
 $status = "Installed"
 $extra_version = ""
+if($version -eq 'pre') {
+  if($null -ne $installed) {
+    $version = $installed.MajorMinorVersion
+    $env:update = 'false'
+  } else {
+    Add-Log $cross "PHP" "No pre-installed PHP version found"
+    Write-Error "No pre-installed PHP version found" -ErrorAction Stop
+  }
+}
 if ($null -eq $installed -or -not("$($installed.Version).".StartsWith(($version -replace '^(\d+(\.\d+)*).*', '$1.'))) -or $ts -ne $installed.ThreadSafe) {
   if ($version -lt '7.0' -and ($null -eq (Get-Module -ListAvailable -Name VcRedist))) {
     Install-PSPackage VcRedist VcRedist-main\VcRedist\VcRedist "$github/aaronparker/VcRedist/archive/main.zip" Get-VcList >$null 2>&1
@@ -434,11 +449,14 @@ if($installed.MajorMinorVersion -ne $version) {
   Write-Error "Could not setup PHP $version" -ErrorAction Stop
 }
 if($version -lt "5.5") {
-  ('libeay32.dll', 'ssleay32.dll') | ForEach-Object -Parallel { Get-File -Url "$using:php_builder/releases/download/openssl-1.0.2u/$_" -OutFile $using:php_dir\$_ >$null 2>&1 }
-} else {
+  ('libeay32.dll', 'ssleay32.dll') | ForEach-Object -Parallel { Invoke-WebRequest -Uri "$using:php_builder/releases/download/openssl-1.0.2u/$_" -OutFile $using:php_dir\$_ >$null 2>&1 }
+} elseif($version -lt "8.5") {
   $enable_extensions += ('opcache')
 }
-Enable-PhpExtension -Extension $enable_extensions -Path $php_dir
+if($version -ge "8.5" -and (Test-Path $ext_dir\php_opcache.dll)) {
+  Remove-Item $ext_dir\php_opcache.dll -Force
+}
+Enable-PhpExtension -Extension ($enable_extensions | Where-Object { Test-Path $ext_dir\php_$_.dll }) -Path $php_dir
 Add-PhpCAInfo
 Add-OpenSSLConf
 Copy-Item -Path $src\configs\pm\*.json -Destination $env:RUNNER_TOOL_CACHE

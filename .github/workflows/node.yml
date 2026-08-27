@@ -2,7 +2,7 @@ name: Node workflow
 on:
   pull_request:
     branches:
-      - master
+      - main
       - develop
       - verbose
     paths-ignore:
@@ -10,7 +10,7 @@ on:
       - 'examples/**'
   push:
     branches:
-      - master
+      - main
       - develop
       - verbose
     paths-ignore:
@@ -18,10 +18,14 @@ on:
       - 'examples/**'
 permissions:
   contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   run:
     name: Run
+    environment: codecov
     runs-on: ${{ matrix.operating-system }}
     strategy:
       fail-fast: false
@@ -29,14 +33,15 @@ jobs:
         operating-system: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 2
+          persist-credentials: false
 
-      - name: Setup Node.js 16.x
-        uses: actions/setup-node@v4
+      - name: Setup Node.js 24.x
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
-          node-version: 16.x
+          node-version: 24.x
 
       - name: Install dependencies
         run: npm install
@@ -54,7 +59,7 @@ jobs:
         run: npm audit
 
       - name: Send Coverage
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354 # v6
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/lcov.info

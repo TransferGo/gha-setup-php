@@ -1,7 +1,13 @@
 # Helper function to get phalcon version
 get_phalcon_version() {
   if [ "$extension" = "phalcon5" ]; then
-    get_pecl_version phalcon stable 5
+    if [ "${version:?}" = "7.4" ]; then
+      echo '5.4.0'
+    elif [ "${version:?}" = "8.0" ]; then
+      echo '5.10.0'
+    else
+      get_pecl_version phalcon stable 5
+    fi
   elif [ "$extension" = "phalcon4" ]; then
     echo '4.1.2'
   elif [ "$extension" = "phalcon3" ]; then
@@ -69,7 +75,7 @@ add_phalcon4() {
   fi
 }
 
-# Function to add phalcon3.
+# Function to add phalcon5.
 add_phalcon5() {
   if shared_extension phalcon; then
     phalcon_version=$(php -d="extension=phalcon.so" -r "echo phpversion('phalcon');" | cut -d'.' -f 1)

@@ -1,4 +1,9 @@
 {
+  "backward-compatibility-check": {
+    "type": "composer",
+    "repository": "roave/backward-compatibility-check",
+    "scope": "scoped"
+  },
   "box": {
     "type": "phar",
     "repository": "box-project/box",
@@ -16,6 +21,11 @@
     "version_prefix": "",
     "version_parameter": "-V"
   },
+  "composer-dependency-analyser": {
+    "type": "composer",
+    "repository": "shipmonk/composer-dependency-analyser",
+    "scope": "scoped"
+  },
   "composer-unused": {
     "type": "phar",
     "repository": "composer-unused/composer-unused",
@@ -30,7 +40,7 @@
     "extension": ".phar",
     "domain": "https://github.com",
     "version_prefix": "",
-    "version_parameter": "-V"
+    "version_parameter": "diagnose"
   },
   "cs2pr": {
     "type": "phar",
@@ -40,6 +50,12 @@
     "version_prefix": "",
     "version_parameter": "-V"
   },
+  "easy-coding-standard": {
+    "type": "composer",
+    "alias": "ecs",
+    "repository": "symplify/easy-coding-standard",
+    "scope": "scoped"
+  },
   "infection": {
     "type": "phar",
     "repository": "infection/infection",
@@ -47,6 +63,11 @@
     "domain": "https://github.com",
     "version_prefix": "",
     "version_parameter": "-V"
+  },
+  "name-collision-detector": {
+    "type": "composer",
+    "repository": "shipmonk/name-collision-detector",
+    "scope": "scoped"
   },
   "phan": {
     "type": "phar",
@@ -66,7 +87,7 @@
   },
   "php-cs-fixer": {
     "type": "phar",
-    "repository": "FriendsOfPHP/PHP-CS-Fixer",
+    "repository": "PHP-CS-Fixer/PHP-CS-Fixer",
     "extension": ".phar",
     "domain": "https://github.com",
     "fetch_latest": "true",
@@ -126,6 +147,14 @@
   "phpstan": {
     "type": "phar",
     "repository": "phpstan/phpstan",
+    "extension": ".phar",
+    "domain": "https://github.com",
+    "version_prefix": "",
+    "version_parameter": "-V"
+  },
+  "pie": {
+    "type": "phar",
+    "repository": "php/pie",
     "extension": ".phar",
     "domain": "https://github.com",
     "version_prefix": "",
@@ -220,6 +249,12 @@
     "domain": "https://github.com",
     "version_prefix": "v"
   },
+  "mago": {
+    "type": "custom-package",
+    "repository": "carthage-software/mago",
+    "domain": "https://github.com",
+    "version_prefix": ""
+  },
   "protoc": {
     "type": "custom-package",
     "repository": "protocolbuffers/protobuf",
@@ -231,7 +266,8 @@
     "type": "custom-package",
     "repository": "symfony-cli/symfony-cli",
     "domain": "https://github.com",
-    "version_prefix": "-V"
+    "version_prefix": "v",
+    "version_parameter": "-V"
   },
   "blackfire-player": {
     "type": "custom-function",
@@ -318,11 +354,5 @@
     "extension": ".phar",
     "version_parameter": "--version",
     "version_prefix": "v"
-  },
-  "easy-coding-standard": {
-    "type": "composer",
-    "alias": "ecs",
-    "repository": "symplify/easy-coding-standard",
-    "scope": "scoped"
   }
 }

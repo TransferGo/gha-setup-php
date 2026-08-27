@@ -3,6 +3,7 @@ $composer_home = "$env:APPDATA\Composer"
 $composer_bin = "$composer_home\vendor\bin"
 $composer_json = "$composer_home\composer.json"
 $composer_lock = "$composer_home\composer.lock"
+$skip_composer_github_auth = $false
 
 # Function to configure composer.
 Function Edit-ComposerConfig() {
@@ -23,13 +24,70 @@ Function Edit-ComposerConfig() {
   if (-not(Test-Path $composer_json)) {
     Set-Content -Path $composer_json -Value "{}"
   }
+  Get-ToolVersion "composer" $null | Out-Null
   Set-ComposerEnv
   Add-Path $composer_bin
   Set-ComposerAuth
 }
 
+# Function to update auth.json.
+Function Update-AuthJson {
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory)][string[]] $ComposerAuth
+  )
+  if (Test-Path $composer_home\auth.json) {
+    try {
+      $existing = Get-Content $composer_home\auth.json -Raw | ConvertFrom-Json
+    } catch {
+      $existing = [PSCustomObject]@{}
+    }
+  } else {
+    $existing = [PSCustomObject]@{}
+  }
+  foreach ($fragment in $ComposerAuth) {
+    $piece = ('{' + $fragment + '}') | ConvertFrom-Json
+    foreach ($prop in $piece.PSObject.Properties) {
+      if ($prop.Name -eq 'http-basic') {
+        if (-not $existing.'http-basic') {
+          $existing | Add-Member -MemberType NoteProperty -Name 'http-basic' -Value ([PSCustomObject]@{}) -Force
+        }
+        foreach ($domainProp in $prop.Value.PSObject.Properties) {
+          $existing.'http-basic' | Add-Member -MemberType NoteProperty -Name $domainProp.Name -Value $domainProp.Value -Force
+        }
+      } else {
+        $existing | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
+      }
+    }
+  }
+  Set-Content -Path $composer_home\auth.json -Value ($existing | ConvertTo-Json -Depth 5)
+}
+
+function Test-GitHubPublicAccess {
+  param(
+    [Parameter(Mandatory=$true)]
+    [string]$Token
+  )
+  try {
+    Invoke-RestMethod -Uri 'https://api.github.com/' -Headers @{ Authorization = "token $Token" } -ErrorAction Stop | Out-Null
+    return $true
+  } catch {
+    return $false
+  }
+}
+
+Function Write-ComposerGhAuthNoOpWarning() {
+  $message = (Get-Content (Join-Path $src 'configs\composer-gh-auth-warn') -Raw).Trim().Replace('%s', $composer_version)
+  if($env:fail_fast -eq 'true') {
+    Add-Log "$cross" "composer" $message
+  } else {
+    Write-Output "::warning::$message"
+  }
+}
+
 # Function to setup authentication in composer.
 Function Set-ComposerAuth() {
+  $token = if ($env:COMPOSER_TOKEN) { $env:COMPOSER_TOKEN } else { $env:GITHUB_TOKEN }
   if(Test-Path env:COMPOSER_AUTH_JSON) {
     if(Test-Json -JSON $env:COMPOSER_AUTH_JSON) {
       Set-Content -Path $composer_home\auth.json -Value $env:COMPOSER_AUTH_JSON
@@ -37,18 +95,27 @@ Function Set-ComposerAuth() {
       Add-Log "$cross" "composer" "Could not parse COMPOSER_AUTH_JSON as valid JSON"
     }
   }
+  if($skip_composer_github_auth) {
+    Write-ComposerGhAuthNoOpWarning
+  }
   $composer_auth = @()
   if(Test-Path env:PACKAGIST_TOKEN) {
     $composer_auth += '"http-basic": {"repo.packagist.com": { "username": "token", "password": "' + $env:PACKAGIST_TOKEN + '"}}'
   }
-  if(-not(Test-Path env:GITHUB_TOKEN) -and (Test-Path env:COMPOSER_TOKEN)) {
-    $env:GITHUB_TOKEN = $env:COMPOSER_TOKEN
-  }
-  if (Test-Path env:GITHUB_TOKEN) {
-    $composer_auth += '"github-oauth": {"github.com": "' + $env:GITHUB_TOKEN + '"}'
+  $write_token = $true
+  if ($token) {
+    if ($skip_composer_github_auth) {
+      $write_token = $false
+    }
+    if ($env:GITHUB_SERVER_URL -ne "https://github.com" -and -not(Test-GitHubPublicAccess $token)) {
+      $write_token = $false
+    }
+    if($write_token) {
+      $composer_auth += '"github-oauth": {"github.com": "' + $token + '"}'
+    }
   }
   if($composer_auth.length) {
-    Add-Env COMPOSER_AUTH ('{' + ($composer_auth -join ',') + '}')
+    Update-AuthJson $composer_auth
   }
 }
 
@@ -58,6 +125,23 @@ Function Set-ComposerEnv() {
     (Get-Content $src\configs\composer.env -Raw) -replace '(?m)^COMPOSER_PROCESS_TIMEOUT=.*$', "COMPOSER_PROCESS_TIMEOUT=$env:COMPOSER_PROCESS_TIMEOUT" | Set-Content $src\configs\composer.env
   }
   Add-EnvPATH $src\configs\composer.env
+  if($env:COMPOSER_ALLOW_PLUGINS) {
+    $env:COMPOSER_ALLOW_PLUGINS -split '\s*,\s*' | Where-Object { $_ } | ForEach-Object {
+      & composer global config --no-plugins "allow-plugins.$_" true > $null 2>&1
+    }
+  }
+}
+
+# Function to identify latest-like URLs that should bypass the persistent cache.
+Function Test-MutableToolUrl() {
+  Param(
+    [Parameter(Position = 0, Mandatory = $true)]
+    [string]
+    $Url
+  )
+  $mutableUrlRegex = '(^|[/?#._=-])(latest|stable|preview|snapshot|nightly|master)([/?#._=-]|$)|/releases/latest/download/'
+  $versionLikeRegex = '(^|[^0-9])[0-9]+\.[0-9]+([.-][0-9A-Za-z]+)*'
+  return ($Url -match $mutableUrlRegex) -or (($Url -match '\.phar([?#].*)?$') -and -not ($Url -match $versionLikeRegex))
 }
 
 # Function to extract tool version.
@@ -103,12 +187,7 @@ Function Add-ToolsHelper() {
   } elseif($tool -eq "cs2pr") {
     (Get-Content $bin_dir/cs2pr).replace('exit(9)', 'exit(0)') | Set-Content $bin_dir/cs2pr
   } elseif($tool -eq "deployer") {
-    if(Test-Path $composer_bin\deployer.phar.bat) {
-      Copy-Item $composer_bin\deployer.phar.bat -Destination $composer_bin\dep.bat
-    }
-    if(Test-Path $composer_bin\dep.bat) {
-      Copy-Item $composer_bin\dep.bat -Destination $composer_bin\deployer.bat
-    }
+    Copy-Item $bin_dir\deployer.bat -Destination $bin_dir\dep.bat
   } elseif($tool -eq "phan") {
     $extensions += @('fileinfo', 'ast')
   } elseif($tool -eq "phinx") {
@@ -148,32 +227,58 @@ Function Add-Tool() {
     [ValidateNotNull()]
     $tool,
     [Parameter(Position = 2, Mandatory = $false)]
-    $ver_param
+    $ver_param,
+    [Parameter(Position = 3, Mandatory = $false)]
+    $skip_composer_github_auth
   )
-  if (Test-Path $bin_dir\$tool) {
-    Copy-Item $bin_dir\$tool -Destination $bin_dir\$tool.old -Force
+  if($tool -eq "composer") {
+    $script:skip_composer_github_auth = $skip_composer_github_auth -eq 'true'
   }
+  $urls = $urls -split ','
   $tool_path = "$bin_dir\$tool"
-  foreach ($url in $urls){
-    if (($url | Split-Path -Extension) -eq ".exe") {
-      $tool_path = "$tool_path.exe"
-    }
-    try {
-      $status_code = (Invoke-WebRequest -Passthru -Uri $url -OutFile $tool_path).StatusCode
-    } catch {
-      if($url -match '.*github.com.*releases.*latest.*') {
-        try {
-          $url = $url.replace("releases/latest/download", "releases/download/" + ([regex]::match((Get-File -Url ($url.split('/release')[0] + "/releases")).Content, "([0-9]+\.[0-9]+\.[0-9]+)/" + ($url.Substring($url.LastIndexOf("/") + 1))).Groups[0].Value).split('/')[0])
-          $status_code = (Invoke-WebRequest -Passthru -Uri $url -OutFile $tool_path).StatusCode
-        } catch { }
+  $is_exe = ((($urls[0] | Split-Path -Extension).ToLowerInvariant()) -eq '.exe')
+  if ($is_exe) { $tool_path = "$tool_path.exe" }
+  $tool_ext = if ($is_exe) { '.exe' } else { '' }
+  $url_stream = [System.IO.MemoryStream]::New([System.Text.Encoding]::UTF8.GetBytes($urls[0]))
+  $cache_key = (Get-FileHash -InputStream $url_stream -Algorithm SHA256).Hash.Substring(0, 16)
+  $cache_path = "$env:TEMP\$tool-$cache_key$tool_ext"
+  $use_cache = -not (Test-MutableToolUrl $urls[0])
+  $status_code = 200
+  if ($use_cache -and (Test-Path $cache_path -PathType Leaf)) {
+    Copy-Item $cache_path -Destination $tool_path -Force
+  } else {
+    $backup_path = "$tool_path.bak"
+    if (Test-Path $tool_path) { Copy-Item $tool_path -Destination $backup_path -Force }
+    foreach ($url in $urls){
+      try {
+        $status_code = (Invoke-WebRequest -Passthru -Uri $url -OutFile $tool_path).StatusCode
+      } catch {
+        if($url -match '.*github.com.*releases.*latest.*') {
+          try {
+            $url = $url.replace("releases/latest/download", "releases/download/" + ([regex]::match((Get-File -Url ($url.split('/release')[0] + "/releases")).Content, "([0-9]+\.[0-9]+\.[0-9]+)/" + ($url.Substring($url.LastIndexOf("/") + 1))).Groups[0].Value).split('/')[0])
+            $status_code = (Invoke-WebRequest -Passthru -Uri $url -OutFile $tool_path).StatusCode
+          } catch {
+            $status_code = 0
+          }
+        } else {
+          $status_code = 0
+        }
+      }
+      if($status_code -eq 200 -and (Test-Path $tool_path)) {
+        if ($use_cache) {
+          Copy-Item $tool_path -Destination $cache_path -Force
+        }
+        break
       }
     }
-    if($status_code -eq 200 -and (Test-Path $tool_path)) {
-      break
+    if ($status_code -ne 200 -and (Test-Path $backup_path)) {
+      Copy-Item $backup_path -Destination $tool_path -Force
     }
+    Remove-Item $backup_path -Force -ErrorAction SilentlyContinue
   }
 
-  if (((Get-ChildItem -Path $bin_dir/* | Where-Object Name -Match "^$tool(.exe|.phar)*$").Count -gt 0)) {
+  $escaped_tool = [regex]::Escape($tool)
+  if (((Get-ChildItem -Path $bin_dir/* | Where-Object Name -Match "^$escaped_tool(\.exe|\.phar)?$").Count -gt 0)) {
     $bat_content = @()
     $bat_content += "@ECHO off"
     $bat_content += "setlocal DISABLEDELAYEDEXPANSION"
@@ -187,8 +292,6 @@ Function Add-Tool() {
   } else {
     if($tool -eq "composer") {
       $env:fail_fast = 'true'
-    } elseif (Test-Path $bin_dir\$tool.old) {
-      Copy-Item $bin_dir\$tool.old -Destination $bin_dir\$tool -Force
     }
     Add-Log $cross $tool "Could not add $tool"
   }

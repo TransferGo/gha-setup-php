@@ -2,7 +2,9 @@
 get_relay_version() {
  local ext=$1
   if [[ "$ext" =~ ^relay$ ]]; then
-    get -s -n "" "${relay_releases:?}"/latest 2<&1 | grep -m 1 -Eo "tag/(v[0-9]+(\.[0-9]+)?(\.[0-9]+)?)" | head -n 1 | cut -d '/' -f 2
+    get -s -n "" "${relay_release:?}"
+  elif [[ $ext =~ ^relay-nightly$ ]]; then
+    echo "dev"
   else
     relay_version="${ext##*-}"
     echo "v${relay_version/v//}"
@@ -34,12 +36,16 @@ get_openssl_suffix() {
 change_library_paths() {
   if [ "$os" = "Darwin" ]; then
     otool -L "${ext_dir:?}"/relay.so | grep -q 'ssl.1' && openssl_version='1.1' || openssl_version='3'
-    [ -e "${brew_prefix:?}"/opt/openssl@"$openssl_version" ] || brew install openssl@"$openssl_version"
+    [ -e "${brew_prefix:?}"/opt/openssl@"$openssl_version" ] || {
+      safe_brew install --skip-link openssl@"$openssl_version" &&
+      brew link --overwrite --force openssl@"$openssl_version"
+    }
     dylibs="$(otool -L "${ext_dir:?}"/relay.so | grep -Eo '.*\.dylib' | cut -f1 -d ' ')"
     install_name_tool -change "$(echo "${dylibs}" | grep -E "libzstd.*dylib" | xargs)" "$brew_prefix"/opt/zstd/lib/libzstd.dylib "$ext_dir"/relay.so
     install_name_tool -change "$(echo "${dylibs}" | grep -E "liblz4.*dylib" | xargs)" "$brew_prefix"/opt/lz4/lib/liblz4.dylib "$ext_dir"/relay.so
     install_name_tool -change "$(echo "${dylibs}" | grep -E "libssl.*dylib" | xargs)" "$brew_prefix"/opt/openssl@"$openssl_version"/lib/libssl.dylib "$ext_dir"/relay.so
     install_name_tool -change "$(echo "${dylibs}" | grep -E "libcrypto.*dylib" | xargs)" "$brew_prefix"/opt/openssl@"$openssl_version"/lib/libcrypto.dylib "$ext_dir"/relay.so
+    install_name_tool -change "$(echo "${dylibs}" | grep -E "libck.*dylib" | xargs)" "$brew_prefix"/opt/concurrencykit/lib/libck.dylib "$ext_dir"/relay.so
   fi
 }
 
@@ -51,7 +57,7 @@ add_relay_dependencies() {
   if [ "$os" = "Darwin" ]; then
     . "${0%/*}"/tools/brew.sh
     configure_brew
-    brew install hiredis lz4 zstd
+    safe_brew install lz4 hiredis zstd concurrencykit
   fi
 }
 
@@ -92,8 +98,7 @@ enable_relay() {
 # Patch binary id in relay extension
 init_relay_binary_id() {
   if [ -e "${ext_dir:?}"/relay.so ]; then
-    grep -aq 00000000 "${ext_dir:?}"/relay.so && \
-      sudo LC_ALL=C sed -i.bak "s/00000000-0000-0000-0000-000000000000/$(uuidgen)/" "$ext_dir"/relay.so
+    sudo LC_ALL=C sed -i.bak "s/00000000-0000-0000-0000-000000000000/$(uuidgen)/" "$ext_dir"/relay.so || true
   fi
 }
 
@@ -106,7 +111,7 @@ configure_relay() {
 
 # Helper function to add relay extension
 add_relay_helper() {
-  arch="$(uname -m | sed 's/_/-/')"
+  local arch=$1
   os_suffix="$(get_os_suffix)"
   openssl_suffix="$(get_openssl_suffix)"
   artifact_file_name="relay-$relay_version-php${version:?}-$os_suffix-$arch$openssl_suffix.tar.gz"
@@ -130,17 +135,24 @@ add_relay() {
   local ext=$1
   local arch
   local url
+  local message
+  local error
   os=$(uname -s)
-  relay_releases=https://github.com/cachewerk/relay/releases
+  arch="$(uname -m | sed 's/_/-/')"
+  relay_release=https://builds.r2.relay.so/meta/latest
   relay_trunk=https://builds.r2.relay.so
-  relay_version=$(get_relay_version "$ext")
-  add_relay_dependencies >/dev/null 2>&1
-  if shared_extension relay; then
-    message="Enabled"
+  if [[ "$arch" = "x86-64" && "$os" = "Darwin" ]]; then
+    error="Relay extension is not available for macOS x86_64 architecture"
   else
-    add_relay_helper >/dev/null 2>&1
-    message="Installed and enabled"
+    relay_version=$(get_relay_version "$ext")
+    add_relay_dependencies >/dev/null 2>&1
+    if shared_extension relay; then
+      message="Enabled"
+    else
+      add_relay_helper "$arch" >/dev/null 2>&1
+      message="Installed and enabled ${relay_version}"
+    fi
+    configure_relay >/dev/null 2>&1
   fi
-  configure_relay >/dev/null 2>&1
-  add_extension_log relay "$message"
+  add_extension_log relay "$message" "$error"
 }
